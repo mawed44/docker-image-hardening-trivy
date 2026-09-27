@@ -1,8 +1,6 @@
 # Durcissement de conteneur & sécurité au runtime (Docker, Cosign & Falco)
 
-Ce laboratoire a pour objectif de construire une image Docker selon le principe du **moindre privilège**, de vérifier son intégrité et l'identité de son signataire avec **Cosign (Sigstore)**, puis de détecter des comportements suspects au runtime avec **Falco et eBPF**. Une petite API HTTP en Go servira de support de démonstration. 
-
-> **Projet en cours de construction.** Ce README décrit la solution prévue et les résultats attendus. L'application, les configurations et les preuves seront ajoutées et validées étape par étape.
+Ce projet a pour objectif de construire une image Docker selon le principe du **moindre privilège**, de vérifier son intégrité et l'identité de son signataire avec **Cosign (Sigstore)**, puis de détecter des comportements suspects au runtime avec **Falco et eBPF**. Une petite API HTTP en Go servira de support de démonstration. 
 
 ## Problématique
 
