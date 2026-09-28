@@ -1,0 +1,2 @@
+# Conserver les fins de ligne Linux pour les scripts Bash.
+*.sh text eol=lf
