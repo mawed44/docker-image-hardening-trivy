@@ -1,0 +1,5 @@
+# Envoyer uniquement les fichiers necessaires a la construction.
+**
+!app/
+!app/main.py
+!app/requirements.txt

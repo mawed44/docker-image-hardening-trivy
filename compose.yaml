@@ -1,0 +1,39 @@
+services:
+  api:
+    build: .
+    image: container-hardening-lab:local
+    user: "10001:10001"
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    read_only: true
+    # Espace temporaire necessaire a Gunicorn.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+
+    cpus: 0.5
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json
+          import urllib.request
+
+          with urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=2) as response:
+              healthy = response.status == 200 and json.load(response) == {"status": "ok"}
+          raise SystemExit(0 if healthy else 1)
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
