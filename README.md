@@ -1,167 +1,136 @@
 # Durcissement de conteneur & sécurité au runtime (Docker, Cosign & Falco)
 
-Ce projet a pour objectif de construire une image Docker selon le principe du **moindre privilège**, de vérifier son intégrité et l'identité de son signataire avec **Cosign (Sigstore)**, puis de détecter des comportements suspects au runtime avec **Falco et eBPF**. Une petite API HTTP en **Python avec Flask** sert de support de démonstration. Les vérifications de l'environnement utilisent un script **Bash**.
+[![Container security](https://github.com/mawed44/docker-security-hardening-sigstore/actions/workflows/container-security.yml/badge.svg)](https://github.com/mawed44/docker-security-hardening-sigstore/actions/workflows/container-security.yml)
 
-> **Étapes 2 à 5 vérifiées localement.** Le workflow de publication et de signature est prêt ; sa première exécution sur GitHub reste à valider. L'accès à Docker depuis Ubuntu WSL et les étapes Falco restent à finaliser.
+Ce laboratoire protège une petite API Python avec une image Docker durcie, un scan **Trivy**, une signature **Cosign (Sigstore)** et une surveillance **Falco avec eBPF**. Le code utilise Python et Bash.
 
 ## Problématique
 
-Un conteneur exécuté avec l'utilisateur `root`, des privilèges inutiles et un système de fichiers modifiable augmente l'impact potentiel d'une compromission. Une image déployée sans vérification de signature ne fournit pas de garantie sur l'identité de son signataire. Enfin, sans surveillance au runtime, une ouverture de shell ou une tentative de modification de fichiers sensibles peut passer inaperçue.
-
-Ces risques nécessitent des contrôles complémentaires : **réduire les privilèges**, **scanner et vérifier l'image avant son lancement**, puis **surveiller son comportement pendant l'exécution**.
+Un conteneur exécuté en root avec des privilèges inutiles et des fichiers modifiables augmente l'impact d'une compromission. Une image doit aussi provenir du signataire attendu, et son comportement doit être surveillé pendant son exécution.
 
 ## Solution apportée
 
-L'[API](app/main.py) utilise **Flask**, dont la version est fixée dans `app/requirements.txt`. Elle expose deux routes : `GET /` pour présenter le laboratoire et `GET /health` pour vérifier son état. Les chemins inconnus renvoient `404` et les requêtes `POST` sur ces routes renvoient `405`. Les journaux du serveur sont envoyés vers la sortie standard.
+L'[API Flask](main.py) expose `GET /` et `GET /health`. Les [six tests HTTP](test_main.py) vérifient les réponses JSON, les chemins inconnus (`404`) et le refus des requêtes `POST` (`405`). Gunicorn sert l'API dans Docker et écrit les journaux sur la sortie standard.
 
-Le [Dockerfile multi-stage commenté](Dockerfile) utilise **Python 3.12.16 sur Alpine 3.24**, fixé par version et digest dans les deux stages. Le premier installe les dépendances dans un environnement virtuel ; le second reçoit cet environnement et le code de l'API. Le compte applicatif utilise l'UID et le GID `10001`, sans répertoire personnel ni shell de connexion. Le code appartient à root avec des permissions `0444`, et pip est retiré de l'image finale.
+Le [Dockerfile](Dockerfile) comporte deux étapes : installation des dépendances, puis création de l'image finale. La base Python/Alpine est fixée par version et digest. Le code appartient à root, l'application utilise l'UID/GID `10001` et pip est retiré de l'image finale.
 
-**Gunicorn 26.2.0** exécute l'API sur le port `8080`. Son `ENTRYPOINT` au format JSON lui transmet directement les signaux d'arrêt. Ses fichiers temporaires vont dans `/tmp` et son socket de contrôle est désactivé.
-
-Le fichier [compose.yaml](compose.yaml) supprime toutes les capacités Linux, active `no-new-privileges` et monte la racine en lecture seule. Un `tmpfs` de **16 Mio** fournit l'espace temporaire de Gunicorn avec les protections `noexec`, `nosuid` et `nodev`. Les limites sont de **0,5 CPU, 128 Mio de RAM et 64 processus**. La limite totale mémoire + swap vaut également 128 Mio, sans swap supplémentaire. Un healthcheck Python vérifie `/health` et la publication du port est limitée à `127.0.0.1`.
-
-Le [workflow Container security](.github/workflows/container-security.yml) comporte deux jobs :
-
-- **`scan`** construit l'image et lance **Trivy 0.76.1** sur les `pull_request` vers `main` et les `push` sur `main`. Le rapport JSON est conservé 30 jours dans les artefacts, même lorsque le scan détecte des vulnérabilités bloquantes.
-- **`publish`** s'exécute après un scan réussi, uniquement sur un `push` sur `main`. Il récupère la même image par une archive `image.tar`, sans la reconstruire, puis appelle [publish-image.sh](scripts/publish-image.sh) pour la publier dans **GHCR**, la signer et vérifier sa signature. Le SHA du commit sert de tag.
-
-| Outil | Contrôle | Échec du job |
+| Outil | Contrôle | Résultat en cas de problème |
 | --- | --- | --- |
-| **Docker** | Construction de l'image multi-stage | Construction impossible |
-| **Trivy** | Vulnérabilités connues de l'image et de ses composants | Sévérité `HIGH` ou `CRITICAL` détectée |
-| **Cosign (Sigstore)** | Signature du digest et vérification de l'identité du workflow signataire | Signature absente, invalide ou identité non autorisée |
-| **Falco** | Détection d'un shell et d'ouvertures en écriture sur des fichiers sensibles de démonstration | Sans objet : émission d'une alerte au runtime, en dehors de la CI |
+| **Docker Compose** | Non-root, `cap_drop: ALL`, `no-new-privileges`, racine en lecture seule | Privilèges et écritures limités |
+| **Trivy** | Vulnérabilités de l'image et de ses composants | Publication bloquée si `HIGH` ou `CRITICAL` |
+| **Cosign** | Signature du digest et identité du signataire | Lancement interrompu si la vérification échoue |
+| **Falco** | Shell exécuté et ouverture en écriture d'un fichier factice | Alerte au runtime |
 
-Après publication, **Cosign 3.1.4** signe le digest avec l'identité **OIDC de GitHub Actions**, puis vérifie la signature. Les actions sont fixées par SHA. GitHub fournit automatiquement `GITHUB_TOKEN` et l'identité OIDC avec les permissions déclarées dans le workflow : aucune clé de signature ni aucun secret manuel ne sont nécessaires.
+Un seul [compose.yaml](compose.yaml) définit les services. L'API démarre seule par défaut, avec un port publié sur `127.0.0.1`, des limites de ressources et un `/tmp` temporaire protégé par `noexec`, `nosuid` et `nodev`. Le profil `runtime` regroupe Falco et le conteneur de simulation.
 
-Le [script de lancement signé](scripts/verify-and-run.sh) accepte uniquement une référence `ghcr.io/mawed44/docker-security-hardening-sigstore@sha256:…`. Il vérifie l'identité exacte du workflow sur `main` et l'émetteur `https://token.actions.githubusercontent.com`, puis transmet ce même digest à Compose. Un échec de vérification interrompt le lancement. Une signature valide ne garantit pas l'absence de vulnérabilités.
+Le [workflow GitHub Actions](.github/workflows/container-security.yml) appelle [scripts/ci.sh](scripts/ci.sh) :
 
-Les règles personnalisées seront placées dans `falco/falco_rules.local.yaml`. Falco assurera la détection et la journalisation ; aucun blocage automatique n'est prévu dans ce laboratoire.
+- **`scan`** construit et analyse l'image lors des `pull_request` vers `main` et des `push` sur `main`. Le rapport Trivy est conservé 30 jours, même si le scan échoue.
+- **`publish`** récupère cette même image par archive, sans reconstruction, après un scan réussi sur un `push` sur `main`. Il la publie dans GHCR, signe son digest avec l'identité OIDC du workflow, puis vérifie la signature.
+
+Les actions sont fixées par SHA. Seul le job de publication reçoit les permissions d'écriture GHCR et OIDC ; aucune clé de signature manuelle n'est nécessaire. Le [script de déploiement](scripts/verify-and-run.sh) accepte uniquement le digest de l'image de ce dépôt et vérifie l'identité exacte du workflow sur `main`, avec l'émetteur GitHub Actions, avant de lancer ce même digest. Une signature valide ne garantit pas l'absence de vulnérabilités.
+
+Les [deux règles Falco](falco_rules.local.yaml) ciblent le label `security.lab=container-hardening` :
+
+- **`Lab Shell`** : exécution d'un shell dans un conteneur du laboratoire.
+- **`Lab Sensitive Write`** : ouverture en écriture réussie de `/etc/lab-sensitive.conf`, un fichier factice.
+
+La simulation utilise un conteneur root avec une racine inscriptible, sans réseau ni montage de fichiers de l'hôte et sans capacités Linux. L'API garde ses restrictions. Falco détecte les actions ; il ne les bloque pas. Le capteur reçoit les capacités nécessaires à eBPF et accède au socket Docker pour identifier les conteneurs ; le montage `:ro` de ce socket ne limite pas les opérations de l'API Docker.
 
 ## Résultats attendus
 
-- API accessible sur `http://127.0.0.1:8080`, avec un endpoint `/health` renvoyant un statut `200`.
-- Application exécutée avec un UID non nul, sans capacités Linux effectives et avec un système de fichiers racine en lecture seule.
-- Rapport Trivy conservé dans les artefacts GitHub Actions et publication interrompue si le seuil de vulnérabilités est dépassé.
-- Signature de l'image vérifiée avant son lancement ; refus avec une identité de signataire incorrecte ou une image non signée.
-- Alerte Falco lors de l'exécution d'un shell dans un conteneur du laboratoire.
-- Refus d'écriture dans le conteneur durci, puis alerte Falco lors d'une ouverture en écriture sur un fichier factice dans un conteneur de simulation dédié.
-- Captures réelles et journaux associés conservés dans `docs/screenshots/` et `docs/evidence/` après exécution des scénarios.
+- API fonctionnelle, exécutée sans privilèges et avec une racine en lecture seule.
+- Publication bloquée par les vulnérabilités `HIGH` ou `CRITICAL` et signature vérifiée avant déploiement.
+- Écriture refusée dans l'API et alertes Falco associées aux conteneurs attendus.
+- Preuves reproductibles conservées dans `docs/`.
 
-**Vérifié pour les étapes 2 à 4 :** image construite, conteneur `healthy`, six tests Python réussis dans l'image, réponses HTTP `200`, `404` et `405`, et 16 contrôles de durcissement réussis. L'écriture dans `/app` échoue avec `EROFS` (système de fichiers en lecture seule), tandis que `/tmp` reste utilisable. Les limites CPU, mémoire et processus ont également été confirmées avec Docker. Le test réel a utilisé le port hôte `18080`, car le port `8080` était déjà occupé.
+La validation après réorganisation confirme **6 tests HTTP**, **16 contrôles de durcissement**, aucune vulnérabilité `HIGH` ou `CRITICAL` et trois alertes Falco réelles sur Docker Desktop avec le noyau WSL2 `6.6.114.1`. Les tests HTTP et de durcissement sont exécutés localement. Les simulations de régression vérifient aussi qu'une alerte du seul simulateur ne peut pas valider le shell attendu dans l'API.
 
-**Vérifié pour les étapes 5 et 6 :** le scan Trivy de l'image locale ne détecte aucune vulnérabilité `HIGH` ou `CRITICAL`. `actionlint` et ShellCheck passent, ainsi que les scénarios de simulation des scripts, dont le refus de démarrer après un échec Cosign. La publication GHCR et la signature de l'image du projet avec GitHub OIDC attendent encore le premier `push` sur `main`. Les tests HTTP et le contrôle de durcissement ci-dessus sont des validations locales ; ils ne sont pas lancés par ce workflow.
+Cette [exécution GitHub Actions réussie](https://github.com/mawed44/docker-security-hardening-sigstore/actions/runs/41124912445) confirme la publication et la vérification Cosign avant la réorganisation des fichiers. La nouvelle organisation devra être validée sur GitHub Actions après le prochain commit et push.
 
-Une base Alpine conserve un shell, ce qui permettra de démontrer sa détection sans abandonner les protections du conteneur. La simulation d'écriture utilisera un fichier factice et ne modifiera aucun fichier sensible de l'hôte. Le refus d'une écriture et la détection d'une ouverture réussie seront vérifiés séparément : une règle portant sur une ouverture réussie ne prouve pas la détection d'une ouverture refusée.
+Consulter les [alertes JSON](docs/falco-alerts.jsonl), le [démarrage eBPF](docs/falco-startup.log) et les [contrôles de durcissement](docs/hardening.txt). Sur l'environnement testé, la mitigation TOCTOU optionnelle n'était pas active ; la collecte et les alertes eBPF fonctionnaient.
+
+Ces images sont des exports visuels des journaux réels :
+
+![Alerte Falco : shell dans l'API durcie](docs/falco-shell.png)
+
+![Alerte Falco : écriture dans le fichier factice](docs/falco-sensitive-write.png)
 
 ## Lancer le projet
 
-Le lancement avec **Docker Compose** nécessite Docker et son plugin Compose. Sous Windows, démarrer Docker Desktop en mode conteneurs Linux. Les commandes `docker compose` fonctionnent depuis **Git Bash ou PowerShell**, sans environnement virtuel ni Python installé sur Windows.
+Installer Docker avec le plugin Compose et utiliser des conteneurs Linux. Les exemples suivants utilisent **Bash** : Git Bash convient aux commandes Docker sous Windows. Falco nécessite un noyau Linux compatible eBPF.
 
-Les scripts suivants utilisent **Bash**. Pour les exécuter localement, installer [Trivy](https://trivy.dev/docs/latest/getting-started/installation/) et [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) dans le `PATH` du terminal. Le workflow GitHub Actions installe automatiquement les versions indiquées plus haut.
-
-**Construire et scanner l'image locale**
+Depuis la racine du dépôt, vérifier Docker :
 
 ```bash
-docker compose build api
-bash scripts/scan-image.sh
+docker info --format 'Système : {{.OSType}} ; noyau : {{.KernelVersion}}'
+docker compose version
 ```
 
-Le [script Trivy](scripts/scan-image.sh) produit `reports/trivy.json`, ignoré par Git, et renvoie un code d'échec si une vulnérabilité `HIGH` ou `CRITICAL` est détectée. Il est aussi possible de lui transmettre un nom d'image en argument.
-
-**Construire et démarrer pour le développement**
-
-Depuis la racine du projet :
+**Construire, démarrer et vérifier l'API**
 
 ```bash
-docker compose up --build -d --wait
-docker compose ps
-```
-
-Ouvrir `http://127.0.0.1:8080/health`. La réponse attendue est un statut `200` avec `{"status":"ok"}`. La racine `/` renvoie `{"message":"Container Hardening Lab"}`.
-
-Si le port `8080` est déjà utilisé par l'API locale, l'arrêter avec `Ctrl+C` avant le lancement. Il est aussi possible de choisir un autre port avec `API_PORT`. Exemple dans **Bash** :
-
-```bash
-API_PORT=18080 docker compose up --build -d --wait
+API_PORT=18080 docker compose up --build -d --wait api
 curl -i http://127.0.0.1:18080/health
+bash scripts/check-hardening.sh
 ```
 
-Le port interne du conteneur reste `8080`.
+La réponse attendue est `200` avec `{"status":"ok"}`. Les 16 contrôles doivent afficher `[OK]`. `API_PORT` permet de choisir le port de l'hôte ; sans cette variable, le port est `8080`. Python s'exécute dans le conteneur et ne doit pas être installé sur Windows. Ce lancement construit une image locale sans vérifier de signature ; le déploiement signé est décrit plus bas.
 
-Ce lancement construit une image locale sans vérifier de signature. Pour déployer l'image publiée dans GHCR, utiliser le script suivant.
+**Scanner l'image**
 
-**Lancer une image signée après publication**
+Installer [Trivy](https://trivy.dev/docs/latest/getting-started/installation/) dans le `PATH`, puis lancer :
 
-Après un `push` sur `main`, ouvrir **Actions > Container security**. Lorsque le workflow réussit, copier la référence `ghcr.io/mawed44/docker-security-hardening-sigstore@sha256:…` depuis le résumé de l'exécution.
+```bash
+bash scripts/ci.sh scan
+```
 
-Dans cette commande Bash, remplacer `<digest>` par les **64 caractères hexadécimaux** du digest obtenu :
+Le rapport est écrit dans `reports/trivy.json`, ignoré par Git. Un autre nom d'image peut être passé après `scan`. Le workflow installe automatiquement Trivy et Cosign.
+
+**Déployer une image signée**
+
+Installer [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) dans le `PATH`. Après un workflow réussi sur `main`, copier la référence GHCR depuis son résumé. Remplacer `<digest>` ci-dessous par ses 64 caractères hexadécimaux :
 
 ```bash
 API_PORT=18080 bash scripts/verify-and-run.sh \
   'ghcr.io/mawed44/docker-security-hardening-sigstore@sha256:<digest>'
 ```
 
-Le script vérifie la signature, puis Compose télécharge et lance ce même digest, sans construction locale, avec les protections de `compose.yaml`. L'API est ensuite accessible sur `http://127.0.0.1:18080/health`.
+Le script vérifie la signature avant de télécharger et démarrer l'image. Pour un package GHCR privé, se connecter avec `docker login ghcr.io --username mawed44` et un jeton autorisé à lire les packages.
 
-Pour télécharger sans authentification, rendre le package GHCR public. S'il reste privé, se connecter avec `docker login ghcr.io --username mawed44` et un jeton disposant de `read:packages`, comme indiqué dans la [documentation GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+**Déclencher les alertes Falco**
 
-**Vérifier le durcissement**
-
-Depuis Git Bash, Ubuntu WSL ou Linux :
+Avec l'API démarrée :
 
 ```bash
-bash scripts/check-hardening.sh
+API_PORT=18080 bash scripts/simulate-intrusion.sh
 ```
 
-Ce [script](scripts/check-hardening.sh) exécute Python **dans le conteneur**. Il vérifie l'API, les UID/GID, les capacités Linux, `NoNewPrivs`, la racine en lecture seule, le refus d'écriture dans `/app`, les protections de `/tmp` et l'absence de pip. Les 16 contrôles doivent afficher `[OK]` ; une erreur interrompt le script avec un code de sortie non nul.
+Le script démarre Falco et le conteneur de simulation, vérifie le durcissement et déclenche les événements. Il attend un shell dans l'API avec l'UID `10001` et une ouverture en écriture du fichier factice dans le bon conteneur de simulation. Il échoue si ces alertes ne sont pas reçues. Les journaux remplacent les preuves précédentes dans `docs/` ; les PNG restent les exports de la validation illustrée.
 
-**Consulter les journaux et arrêter le projet**
+**Consulter les journaux et arrêter tous les services**
 
 ```bash
 docker compose logs api
-docker compose down
+docker compose logs -f falco
+# Quitter le suivi avec Ctrl+C, puis arrêter le laboratoire.
+docker compose --profile runtime down
 ```
 
-**Développement local et tests Python — option Ubuntu WSL ou Linux**
+**Développement Python local — option Ubuntu WSL ou Linux**
 
-Cette option utilise Python 3 et le module `venv` sur Linux. Sous Ubuntu, installer au besoin le paquet `python3-venv`. Si le terminal affiche `MINGW64`, il s'agit de Git Bash : ouvrir Ubuntu avec `wsl -d Ubuntu` avant de suivre ces commandes. Un environnement virtuel créé dans WSL utilise Python Linux et ne fonctionne pas dans Git Bash.
+Un environnement virtuel créé dans WSL s'utilise depuis Ubuntu, pas depuis Git Bash. Pour y utiliser aussi Docker, activer l'intégration Ubuntu dans Docker Desktop.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python3 -m pip install -r app/requirements.txt
-python3 -m unittest discover -s app -v
-python3 app/main.py
+python3 -m pip install -r requirements.txt
+python3 -m unittest -v
+python3 main.py
 ```
 
-Les six [tests HTTP](app/test_main.py) utilisent `unittest` et le client de test de Flask. Ils vérifient les réponses JSON, les chemins inconnus et le rejet des requêtes `POST`, sans serveur à démarrer séparément.
-
-Le lancement local utilise le serveur de développement Flask sur `127.0.0.1:8080`, avec le mode debug désactivé. Utiliser `Ctrl+C` pour l'arrêter et `deactivate` pour quitter l'environnement virtuel. Lors des prochains lancements, activer `.venv` puis exécuter `python3 app/main.py`.
-
-**Vérification de l'environnement Ubuntu WSL — étape 1 à finaliser**
-
-Pour accéder à Docker depuis Ubuntu, activer **Docker Desktop > Settings > Resources > WSL Integration > Ubuntu**, puis appliquer les changements. Voir la [documentation Docker](https://docs.docker.com/desktop/features/wsl/#enable-docker-in-a-wsl-2-distribution).
-
-```bash
-bash scripts/check-environment.sh
-```
-
-Ce [script](scripts/check-environment.sh), destiné à Ubuntu WSL ou Linux, vérifie Git, Python 3 et Docker. L'intégration Docker dans Ubuntu reste à activer sur l'environnement testé. La compatibilité eBPF et l'observation des conteneurs par Falco seront vérifiées à l'étape correspondante.
-
-**Progression du projet**
-
-- [ ] Finaliser l'accès à Docker depuis Ubuntu WSL avec le script Bash.
-- [x] Créer et valider l'API HTTP.
-- [x] Construire l'image multi-stage avec un utilisateur non-root.
-- [x] Configurer et vérifier les restrictions d'exécution.
-- [x] Scanner l'image avec Trivy et préparer le contrôle GitHub Actions.
-- [ ] Valider la première publication, signature et vérification sur GitHub Actions ; configuration prête.
-- [ ] Configurer Falco, vérifier sa sonde eBPF et ajouter les règles locales.
-- [ ] Exécuter les simulations, enregistrer les preuves et mettre à jour ce README.
-
-Falco sera ajouté à l'étape suivante pour surveiller le conteneur au runtime.
+Le serveur local écoute sur `127.0.0.1:8080`, avec le mode debug désactivé. Utiliser `Ctrl+C` pour l'arrêter et `deactivate` pour quitter l'environnement virtuel.
 
 ## Licence
 
-La licence prévue est **MIT**. Le fichier `LICENSE` sera ajouté avant la publication du projet.
+La licence prévue est **MIT**. Le fichier `LICENSE` reste à ajouter.

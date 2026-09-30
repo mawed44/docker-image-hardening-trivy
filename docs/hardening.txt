@@ -1,0 +1,16 @@
+[OK] L'API repond avec le statut 200 et le JSON attendu.
+[OK] La commande de verification utilise l'UID et le GID 10001.
+[OK] Le processus principal utilise l'UID et le GID 10001.
+[OK] CapInh : aucune capacite Linux.
+[OK] CapPrm : aucune capacite Linux.
+[OK] CapEff : aucune capacite Linux.
+[OK] CapBnd : aucune capacite Linux.
+[OK] CapAmb : aucune capacite Linux.
+[OK] L'acquisition de nouveaux privileges est interdite.
+[OK] Le systeme de fichiers racine est en lecture seule.
+[OK] Une creation de fichier dans /app est refusee (EROFS).
+[OK] L'espace temporaire /tmp est inscriptible.
+[OK] /tmp : protection noexec active.
+[OK] /tmp : protection nosuid active.
+[OK] /tmp : protection nodev active.
+[OK] pip est absent de l'environnement applicatif.

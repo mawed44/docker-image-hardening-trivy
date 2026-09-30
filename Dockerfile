@@ -2,7 +2,7 @@
 FROM python:3.12.16-alpine3.24@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS builder
 
 WORKDIR /build
-COPY app/requirements.txt .
+COPY requirements.txt .
 
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
@@ -22,7 +22,7 @@ RUN python -m pip uninstall --yes pip \
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 
-COPY --chmod=0444 app/main.py ./main.py
+COPY --chmod=0444 main.py ./main.py
 
 USER 10001:10001
 EXPOSE 8080
