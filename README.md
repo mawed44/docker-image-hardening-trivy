@@ -10,7 +10,7 @@ Un conteneur exécuté en root avec des privilèges inutiles et des fichiers mod
 
 ## Solution apportée
 
-L'[API Flask](main.py) expose `GET /` et `GET /health`. Les [six tests HTTP](test_main.py) vérifient les réponses JSON, les chemins inconnus (`404`) et le refus des requêtes `POST` (`405`). Gunicorn sert l'API dans Docker et écrit les journaux sur la sortie standard.
+L'[API Flask](main.py) expose `GET /` et `GET /health`. Gunicorn sert l'API dans Docker et écrit les journaux sur la sortie standard.
 
 Le [Dockerfile](Dockerfile) comporte deux étapes : installation des dépendances, puis création de l'image finale. La base Python/Alpine est fixée par version et digest. Le code appartient à root, l'application utilise l'UID/GID `10001` et pip est retiré de l'image finale.
 
@@ -44,7 +44,7 @@ La simulation utilise un conteneur root avec une racine inscriptible, sans rése
 - Écriture refusée dans l'API et alertes Falco associées aux conteneurs attendus.
 - Preuves reproductibles conservées dans `docs/`.
 
-La validation après réorganisation confirme **6 tests HTTP**, **16 contrôles de durcissement**, aucune vulnérabilité `HIGH` ou `CRITICAL` et trois alertes Falco réelles sur Docker Desktop avec le noyau WSL2 `6.6.114.1`. Les tests HTTP et de durcissement sont exécutés localement. Les simulations de régression vérifient aussi qu'une alerte du seul simulateur ne peut pas valider le shell attendu dans l'API.
+La validation après réorganisation confirme **16 contrôles de durcissement**, aucune vulnérabilité `HIGH` ou `CRITICAL` et trois alertes Falco réelles sur Docker Desktop avec le noyau WSL2 `6.6.114.1`. Ces contrôles sont exécutés localement. Les simulations de régression vérifient aussi qu'une alerte du seul simulateur ne peut pas valider le shell attendu dans l'API.
 
 Cette [exécution GitHub Actions réussie](https://github.com/mawed44/docker-security-hardening-sigstore/actions/runs/41124912445) confirme la publication et la vérification Cosign avant la réorganisation des fichiers. La nouvelle organisation devra être validée sur GitHub Actions après le prochain commit et push.
 
@@ -125,7 +125,6 @@ Un environnement virtuel créé dans WSL s'utilise depuis Ubuntu, pas depuis Git
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
-python3 -m unittest -v
 python3 main.py
 ```
 
