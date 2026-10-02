@@ -1,134 +1,104 @@
-# Durcissement de conteneur & sécurité au runtime (Docker, Cosign & Falco)
+# Durcissement d’images Docker & scan de conteneurs (Trivy)
 
-[![Container security](https://github.com/mawed44/docker-security-hardening-sigstore/actions/workflows/container-security.yml/badge.svg)](https://github.com/mawed44/docker-security-hardening-sigstore/actions/workflows/container-security.yml)
+[![Docker image scans](https://github.com/mawed44/docker-security-hardening-sigstore/actions/workflows/container-security.yml/badge.svg)](https://github.com/mawed44/docker-security-hardening-sigstore/actions/workflows/container-security.yml)
 
-Ce laboratoire protège une petite API Python avec une image Docker durcie, un scan **Trivy**, une signature **Cosign (Sigstore)** et une surveillance **Falco avec eBPF**. Le code utilise Python et Bash.
+Ce laboratoire compare deux images Docker d’une même petite API Python : une image Debian complète exécutée en root, puis une image Alpine minimale exécutée avec l’utilisateur `10001`. **Trivy** mesure les vulnérabilités avant et après le durcissement.
 
 ## Problématique
 
-Un conteneur exécuté en root avec des privilèges inutiles et des fichiers modifiables augmente l'impact d'une compromission. Une image doit aussi provenir du signataire attendu, et son comportement doit être surveillé pendant son exécution.
+Une image peut embarquer des bibliothèques vulnérables et des outils inutiles à l’application. Exécuter cette application en root augmente aussi l’impact d’une compromission.
 
 ## Solution apportée
 
-L'[API Flask](main.py) expose `GET /` et `GET /health`. Gunicorn sert l'API dans Docker et écrit les journaux sur la sortie standard.
+L’[API Flask](main.py) expose `GET /` et `GET /health`. Les deux images utilisent Python `3.12.16`, les mêmes [dépendances](requirements.txt) et le même serveur Gunicorn.
 
-Le [Dockerfile](Dockerfile) comporte deux étapes : installation des dépendances, puis création de l'image finale. La base Python/Alpine est fixée par version et digest. Le code appartient à root, l'application utilise l'UID/GID `10001` et pip est retiré de l'image finale.
+| Fichier | Rôle |
+| --- | --- |
+| [Dockerfile.before](Dockerfile.before) | Image Debian complète, avec les outils de développement et l’utilisateur root par défaut |
+| [Dockerfile](Dockerfile) | Image Alpine, utilisateur `10001:10001`, installation sans cache et suppression de pip |
+| [scripts/scan-images.sh](scripts/scan-images.sh) | Construction des deux images, scans Trivy et génération des rapports |
+| [Workflow GitHub Actions](.github/workflows/container-security.yml) | Exécution du script à chaque `push` sur `main` et `pull_request` vers `main` |
 
-| Outil | Contrôle | Résultat en cas de problème |
-| --- | --- | --- |
-| **Docker Compose** | Non-root, `cap_drop: ALL`, `no-new-privileges`, racine en lecture seule | Privilèges et écritures limités |
-| **Trivy** | Vulnérabilités de l'image et de ses composants | Publication bloquée si `HIGH` ou `CRITICAL` |
-| **Cosign** | Signature du digest et identité du signataire | Lancement interrompu si la vérification échoue |
-| **Falco** | Shell exécuté et ouverture en écriture d'un fichier factice | Alerte au runtime |
+La base Alpine ne contient pas `curl`, `apt`, `bash` ou `gcc`. Elle conserve le shell BusyBox `sh` et le gestionnaire `apk` : cette image n’est pas Distroless. Les bases sont fixées par version et digest.
 
-Un seul [compose.yaml](compose.yaml) définit les services. L'API démarre seule par défaut, avec un port publié sur `127.0.0.1`, des limites de ressources et un `/tmp` temporaire protégé par `noexec`, `nosuid` et `nodev`. Le profil `runtime` regroupe Falco et le conteneur de simulation.
-
-Le [workflow GitHub Actions](.github/workflows/container-security.yml) appelle [scripts/ci.sh](scripts/ci.sh) :
-
-- **`scan`** construit et analyse l'image lors des `pull_request` vers `main` et des `push` sur `main`. Le rapport Trivy est conservé 30 jours, même si le scan échoue.
-- **`publish`** récupère cette même image par archive, sans reconstruction, après un scan réussi sur un `push` sur `main`. Il la publie dans GHCR, signe son digest avec l'identité OIDC du workflow, puis vérifie la signature.
-
-Les actions sont fixées par SHA. Seul le job de publication reçoit les permissions d'écriture GHCR et OIDC ; aucune clé de signature manuelle n'est nécessaire. Le [script de déploiement](scripts/verify-and-run.sh) accepte uniquement le digest de l'image de ce dépôt et vérifie l'identité exacte du workflow sur `main`, avec l'émetteur GitHub Actions, avant de lancer ce même digest. Une signature valide ne garantit pas l'absence de vulnérabilités.
-
-Les [deux règles Falco](falco_rules.local.yaml) ciblent le label `security.lab=container-hardening` :
-
-- **`Lab Shell`** : exécution d'un shell dans un conteneur du laboratoire.
-- **`Lab Sensitive Write`** : ouverture en écriture réussie de `/etc/lab-sensitive.conf`, un fichier factice.
-
-La simulation utilise un conteneur root avec une racine inscriptible, sans réseau ni montage de fichiers de l'hôte et sans capacités Linux. L'API garde ses restrictions. Falco détecte les actions ; il ne les bloque pas. Le capteur reçoit les capacités nécessaires à eBPF et accède au socket Docker pour identifier les conteneurs ; le montage `:ro` de ce socket ne limite pas les opérations de l'API Docker.
+Le script conserve **toutes les sévérités** dans les rapports JSON et génère des résumés texte. Il termine en erreur si l’image durcie contient une vulnérabilité `HIGH` ou `CRITICAL`. Les failles de l’image de départ servent au comparatif et ne bloquent pas ce contrôle.
 
 ## Résultats attendus
 
-- API fonctionnelle, exécutée sans privilèges et avec une racine en lecture seule.
-- Publication bloquée par les vulnérabilités `HIGH` ou `CRITICAL` et signature vérifiée avant déploiement.
-- Écriture refusée dans l'API et alertes Falco associées aux conteneurs attendus.
-- Preuves reproductibles conservées dans `docs/`.
+- Réduire la taille de l’image et le nombre de vulnérabilités détectées.
+- Faire fonctionner la même API sans utiliser root.
+- Conserver un rapport lisible et un rapport JSON pour chaque image.
+- Télécharger les rapports depuis GitHub Actions pendant 30 jours, même si le contrôle final échoue.
 
-La validation après réorganisation confirme **16 contrôles de durcissement**, aucune vulnérabilité `HIGH` ou `CRITICAL` et trois alertes Falco réelles sur Docker Desktop avec le noyau WSL2 `6.6.114.1`. Ces contrôles sont exécutés localement. Les simulations de régression vérifient aussi qu'une alerte du seul simulateur ne peut pas valider le shell attendu dans l'API.
+## Comparatif avant / après
 
-Cette [exécution GitHub Actions réussie](https://github.com/mawed44/docker-security-hardening-sigstore/actions/runs/41124912445) confirme la publication et la vérification Cosign avant la réorganisation des fichiers. La nouvelle organisation devra être validée sur GitHub Actions après le prochain commit et push.
+Mesures locales du **30 octobre 2026**, avec Trivy `0.76.1`, sa base de vulnérabilités mise à jour le même jour et Docker Desktop sur `linux/amd64`.
 
-Consulter les [alertes JSON](docs/falco-alerts.jsonl), le [démarrage eBPF](docs/falco-startup.log) et les [contrôles de durcissement](docs/hardening.txt). Sur l'environnement testé, la mitigation TOCTOU optionnelle n'était pas active ; la collecte et les alertes eBPF fonctionnaient.
+| Critère | Avant | Après |
+| --- | --- | --- |
+| Base Linux | Debian Bookworm `12.15` | Alpine `3.24.3` |
+| Occupation disque affichée par Docker | 1,48 Go | 84,3 Mo |
+| Utilisateur | root, UID `0` | app, UID `10001` |
+| Paquets du système détectés | 429 | 38 |
+| Vulnérabilités `CRITICAL` | 20 | 0 |
+| Vulnérabilités `HIGH` | 467 | 0 |
+| Vulnérabilités `MEDIUM` | 2 004 | 0 |
+| Vulnérabilités `LOW` | 1 905 | 0 |
+| Sévérité `UNKNOWN` | 62 | 0 |
+| **Total des détections** | **4 458** | **0** |
+| Réponse de `/health` | `200`, `{"status":"ok"}` | `200`, `{"status":"ok"}` |
 
-Ces images sont des exports visuels des journaux réels :
+L’occupation disque diminue d’environ **94 %**. Les totaux comptent les couples paquet/vulnérabilité, pas les CVE uniques. Le changement de base et le retrait de pip réduisent les composants exposés ; l’utilisateur non-root limite les privilèges mais ne corrige pas les CVE.
 
-![Alerte Falco : shell dans l'API durcie](docs/falco-shell.png)
+Ces résultats dépendent des images, de la plateforme et de la base Trivy à la date du scan. Zéro détection ne garantit pas l’absence de vulnérabilités. Le nouveau workflow devra être validé sur GitHub après le prochain push.
 
-![Alerte Falco : écriture dans le fichier factice](docs/falco-sensitive-write.png)
+Consulter les rapports [avant](reports/trivy-before.txt) et [après](reports/trivy-after.txt), ainsi que leurs versions JSON [avant](reports/trivy-before.json) et [après](reports/trivy-after.json).
 
 ## Lancer le projet
 
-Installer Docker avec le plugin Compose et utiliser des conteneurs Linux. Les exemples suivants utilisent **Bash** : Git Bash convient aux commandes Docker sous Windows. Falco nécessite un noyau Linux compatible eBPF.
+Installer **Docker Desktop en mode conteneurs Linux** et [Trivy](https://trivy.dev/docs/latest/getting-started/installation/). Les commandes suivantes s’exécutent depuis la racine du projet dans **Bash** ; sous Windows, utiliser Git Bash avec `trivy.exe` accessible dans le `PATH`.
 
-Depuis la racine du dépôt, vérifier Docker :
-
-```bash
-docker info --format 'Système : {{.OSType}} ; noyau : {{.KernelVersion}}'
-docker compose version
-```
-
-**Construire, démarrer et vérifier l'API**
+**1. Vérifier les outils**
 
 ```bash
-API_PORT=18080 docker compose up --build -d --wait api
-curl -i http://127.0.0.1:18080/health
-bash scripts/check-hardening.sh
+docker info --format '{{.OSType}}'
+trivy --version
 ```
 
-La réponse attendue est `200` avec `{"status":"ok"}`. Les 16 contrôles doivent afficher `[OK]`. `API_PORT` permet de choisir le port de l'hôte ; sans cette variable, le port est `8080`. Python s'exécute dans le conteneur et ne doit pas être installé sur Windows. Ce lancement construit une image locale sans vérifier de signature ; le déploiement signé est décrit plus bas.
+Docker doit afficher `linux`. Aucun Python local n’est nécessaire.
 
-**Scanner l'image**
-
-Installer [Trivy](https://trivy.dev/docs/latest/getting-started/installation/) dans le `PATH`, puis lancer :
+**2. Construire et scanner les deux images**
 
 ```bash
-bash scripts/ci.sh scan
+bash scripts/scan-images.sh
 ```
 
-Le rapport est écrit dans `reports/trivy.json`, ignoré par Git. Un autre nom d'image peut être passé après `scan`. Le workflow installe automatiquement Trivy et Cosign.
-
-**Déployer une image signée**
-
-Installer [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) dans le `PATH`. Après un workflow réussi sur `main`, copier la référence GHCR depuis son résumé. Remplacer `<digest>` ci-dessous par ses 64 caractères hexadécimaux :
+Le premier scan télécharge la base de vulnérabilités Trivy. Les résultats remplacent les fichiers dans `reports/`. Le script affiche les tailles des images puis le résultat du contrôle `HIGH,CRITICAL` de l’image durcie. Pour consulter les détails :
 
 ```bash
-API_PORT=18080 bash scripts/verify-and-run.sh \
-  'ghcr.io/mawed44/docker-security-hardening-sigstore@sha256:<digest>'
+cat reports/trivy-before.txt
+cat reports/trivy-after.txt
 ```
 
-Le script vérifie la signature avant de télécharger et démarrer l'image. Pour un package GHCR privé, se connecter avec `docker login ghcr.io --username mawed44` et un jeton autorisé à lire les packages.
-
-**Déclencher les alertes Falco**
-
-Avec l'API démarrée :
+**3. Lancer l’image durcie**
 
 ```bash
-API_PORT=18080 bash scripts/simulate-intrusion.sh
+docker run --detach --name hardening-api \
+  --publish 127.0.0.1:18080:8080 hardening-lab:after
+curl http://127.0.0.1:18080/health
+docker exec hardening-api id
 ```
 
-Le script démarre Falco et le conteneur de simulation, vérifie le durcissement et déclenche les événements. Il attend un shell dans l'API avec l'UID `10001` et une ouverture en écriture du fichier factice dans le bon conteneur de simulation. Il échoue si ces alertes ne sont pas reçues. Les journaux remplacent les preuves précédentes dans `docs/` ; les PNG restent les exports de la validation illustrée.
+La réponse attendue est `{"status":"ok"}`. La commande `id` doit afficher `uid=10001(app) gid=10001(app)`. Ouvrir aussi [http://localhost:18080](http://localhost:18080) dans le navigateur.
 
-**Consulter les journaux et arrêter tous les services**
+**4. Arrêter l’application**
 
 ```bash
-docker compose logs api
-docker compose logs -f falco
-# Quitter le suivi avec Ctrl+C, puis arrêter le laboratoire.
-docker compose --profile runtime down
+docker stop hardening-api
+docker rm hardening-api
 ```
 
-**Développement Python local — option Ubuntu WSL ou Linux**
-
-Un environnement virtuel créé dans WSL s'utilise depuis Ubuntu, pas depuis Git Bash. Pour y utiliser aussi Docker, activer l'intégration Ubuntu dans Docker Desktop.
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 main.py
-```
-
-Le serveur local écoute sur `127.0.0.1:8080`, avec le mode debug désactivé. Utiliser `Ctrl+C` pour l'arrêter et `deactivate` pour quitter l'environnement virtuel.
+Dans GitHub Actions, le job `scan` effectue les mêmes constructions et scans. Les résultats sont disponibles dans l’artefact `trivy-reports` de chaque exécution. Le comparatif du README est une mesure datée ; il ne se met pas à jour automatiquement.
 
 ## Licence
 

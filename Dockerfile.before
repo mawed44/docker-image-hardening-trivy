@@ -1,0 +1,13 @@
+# Image de depart : Debian complete, execution en root.
+FROM python:3.12.16-bookworm@sha256:a5bab0ff300f91231c2e68bf73a8a8d60762ac39ce1c50eaf6803e4c38a9062b
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY main.py .
+
+EXPOSE 8080
+CMD ["gunicorn", "--bind=0.0.0.0:8080", "--threads=2", "--no-control-socket", "main:app"]
